@@ -22,14 +22,14 @@ extern "C" __declspec(dllexport) void __stdcall NativeInjectionEntryPoint(void*)
 
 void patchGame(std::int32_t patchSite, void* newCode)
 {
-    constexpr SIZE_T jmpSize = 6;
+    constexpr SIZE_T jmpSize = 5;
 
     // create new x86 assembly instruction
     // jmp rel32
-    std::uint8_t instruction[jmpSize] = { 0x0F, 0x85, 0, 0, 0, 0 };
+    std::uint8_t instruction[jmpSize] = { 0xE9, 0, 0, 0, 0 };
     std::int32_t jmpTarget = reinterpret_cast<std::int32_t>(newCode);
     std::int32_t offset = jmpTarget - (patchSite + jmpSize);
-    std::memcpy(instruction + 2, &offset, sizeof(offset));
+    std::memcpy(instruction + 1, &offset, sizeof(offset));
 
     // change the memory protection so we can alter game's memory
     DWORD oldProtection = 0;
@@ -92,11 +92,11 @@ __declspec(naked) void patched54EA88()
 
         mov     edi, dword ptr[ebx];
         mov     ebp, dword ptr[esp + (0x5C - 0x48)];
-        mov     eax, 0x54EA8E;
-        jmp     eax;
+        push    0x54EA8E;
+        ret;
     failure:
-        mov     edi, 0x54EB32;
-        jmp     edi;
+        push    0x54EB32;
+        ret;
     }
 }
 
