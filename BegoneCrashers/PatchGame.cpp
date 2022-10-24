@@ -1,27 +1,66 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
-#include "pch.h"
+#include "framework.hpp"
+#include <atomic>
+#include <system_error>
 
-using namespace std::literals;
-
+bool checkAddress(std::uintptr_t address);
 void patchGame(std::int32_t patchSite, void* newCode);
 void patched54EA88();
+void patched590048();
 void patched81D1F6();
 
-extern "C" __declspec(dllexport) void __stdcall NativeInjectionEntryPoint(void*)
+std::atomic_flag alreadyInitialized = {};
+
+extern "C" LRESULT CALLBACK WindowsHookEntryPoint(int code, WPARAM wParam, LPARAM lParam)
 {
-    try
+    // test_and_set() checks the flag, and sets the flag to true
+    if (not alreadyInitialized.test_and_set())
     {
-        // 0x54EA88 is Steam version address.
-        // Origin version address: 0x590048
-        patchGame(0x54EA88, patched54EA88);
-        // 0x81D1F6 is Steam version address.
-        // Origin version address: 0x85B386
-        patchGame(0x81D1F6, patched81D1F6);
+        try
+        {
+            bool isRa3 = false;
+            if (checkAddress(0xC5B6C4))
+            {
+                // Steam version
+                patchGame(0x54EA88, &patched54EA88);
+                patchGame(0x81D1F6, &patched81D1F6);
+                isRa3 = true;
+            }
+            else if (checkAddress(0xC6262C))
+            {
+                // Origin version
+                patchGame(0x590048, &patched590048);
+                patchGame(0x85B386, &patched81D1F6);
+                isRa3 = true;
+            }
+            else
+            {
+                MessageBoxA(nullptr, "This is not Red Alert 3", "BegoneCrashers", MB_OK);
+            }
+
+            if (isRa3)
+            {
+                // prevent this dll from being unloaded
+                HMODULE unused = nullptr;
+                GetModuleHandleExW
+                (
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    reinterpret_cast<LPCWSTR>(&WindowsHookEntryPoint),
+                    &unused
+                );
+            }
+        }
+        catch (std::exception const& e)
+        {
+            MessageBoxA(nullptr, e.what(), "BegoneCrashers Error", MB_OK);
+        }
     }
-    catch (std::exception const& e)
-    {
-        MessageBoxA(nullptr, e.what(), nullptr, MB_OK);
-    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+bool checkAddress(std::uintptr_t address)
+{
+    return std::strncmp(reinterpret_cast<char const*>(address), "RedAlert", 8) == 0;
 }
 
 void patchGame(std::int32_t patchSite, void* newCode)
@@ -47,10 +86,10 @@ void patchGame(std::int32_t patchSite, void* newCode)
     );
     if (not memoryProtectionChanged)
     {
-        int error = static_cast<int>(GetLastError());
+        int errorCode = GetLastError();
         throw std::system_error
         {
-            error,
+            errorCode,
             std::system_category(),
             "VirtualProtect failed"
         };
@@ -68,10 +107,10 @@ void patchGame(std::int32_t patchSite, void* newCode)
     );
     if (not instructionCacheFlushed)
     {
-        int error = static_cast<int>(GetLastError());
+        int errorCode = GetLastError();
         throw std::system_error
         {
-            error,
+            errorCode,
             std::system_category(),
             "FlushInstructionCache failed"
         };
@@ -82,8 +121,8 @@ __declspec(naked) void patched54EA88()
 {
     //  mov     ecx, [edx + 374h]
     //  mov     edx, [esi + 374h]
-    //  mov     eax, [edx + 144h] // This crash!!!
-    //  mov     edi, [ecx + 144h] // This crash!!!
+    //  mov     eax, [edx + 144h] // This might crash
+    //  mov     edi, [ecx + 144h] // This might crash
     __asm
     {
         // availaible registers: edi, ebp, eax, ecx
@@ -101,20 +140,67 @@ __declspec(naked) void patched54EA88()
         mov     edi, dword ptr[ebx];
         mov     ebp, dword ptr[esp + (0x5C - 0x48)];
 
+        // Now we are sure it won't crash.
+        // Go back to game code which loads [edx + 144h] and [ecx + 144h]
         // 0x54EA8E is Steam version address.
         // Origin version address: 0x59004E
         push    0x54EA8E; // go back to game code
         ret;
     failure:
+        // We think the game is going crash
+        // We jump away to prevent executing the crashing code.
         // 0x54EB32 is Steam version address.
         // Origin version address: 0x5900F2
-        push    0x54EB32; // go back to game code
+        push    0x54EB32; // jump away
+        ret;
+    }
+}
+
+__declspec(naked) void patched590048()
+{
+    // Fix crash for Origin version at 0x590048
+
+    //  mov     ecx, [edx + 374h]
+    //  mov     edx, [esi + 374h]
+    //  mov     eax, [edx + 144h] // This might crash
+    //  mov     edi, [ecx + 144h] // This might crash
+    __asm
+    {
+        // availaible registers: edi, ebp, eax, ecx
+
+        mov     edi, dword ptr[esi + 0x374];
+        test    edi, edi; // check if it's null
+        // if it's null, jump away to prevent crash
+        jz      failure;
+
+        mov     edi, dword ptr[edx + 0x374];
+        test    edi, edi; // check if it's null
+        // if it's null, jump away to prevent crash
+        jz      failure;
+
+        mov     edi, dword ptr[ebx];
+        mov     ebp, dword ptr[esp + (0x5C - 0x48)];
+
+        // Now we are sure it won't crash.
+        // Go back to game code which loads [edx + 144h] and [ecx + 144h]
+        // 0x59004E is Origin version address.
+        // Steam version address: 0x54EA8E
+        push    0x59004E; // go back to game code
+        ret;
+    failure:
+        // We think the game is going crash
+        // We jump away to prevent executing the crashing code.
+        // 0x5900F2 is Origin version address.
+        // Steam version address: 0x54EB32
+        push    0x5900F2; // jump away
         ret;
     }
 }
 
 __declspec(naked) void patched81D1F6()
 {
+    // Steam Address: 0x81D1F6
+    // Origin Address: 0x85B386
     __asm
     {
         mov     ecx, dword ptr[ebx + 0x374];
@@ -123,13 +209,13 @@ __declspec(naked) void patched81D1F6()
         test    ecx, ecx; // check ecx
         mov     edx, 0;
         jz      afterEdx; // skip next instruction to prevent crash
-        mov     edx, dword ptr[ecx + 0x144]; // This might crash!!!
+        mov     edx, dword ptr[ecx + 0x144]; // This might crash
     afterEdx:
         // let ecx be 0 or [eax + 0x144], only if eax is not null
         test    eax, eax; // check eax
         mov     ecx, 0;
         jz      afterEcx; // skip next instruction to prevent crash
-        mov     ecx, dword ptr[eax + 0x144]; // This might crash!!!
+        mov     ecx, dword ptr[eax + 0x144]; // This might crash
     afterEcx:
         cmp     ecx, edx;
         pop     edi;
